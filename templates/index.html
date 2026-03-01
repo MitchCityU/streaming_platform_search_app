@@ -1,0 +1,90 @@
+<!doctype html>
+<html>
+<head>
+  <title>CSV Search</title>
+</head>
+<body>
+
+<h2>CSV Search Demo</h2>
+
+<form method="GET" action="/search">
+
+  <label>Search Mode:</label>
+  <select name="mode">
+    <option value="tst" {% if mode == "tst" %}selected{% endif %}>
+      Ternary Search Tree (Title prefix)
+    </option>
+    <option value="bloom" {% if mode == "bloom" %}selected{% endif %}>
+      Bloom Filter (Title exact)
+    </option>
+    <option value="bptree" {% if mode == "bptree" %}selected{% endif %}>
+      B+ Tree (Year range)
+    </option>
+  </select>
+
+  <br><br>
+
+  <label>Title Query:</label>
+  <input type="text" name="q" value="{{ q or '' }}">
+
+  <br><br>
+
+  <label>Year Min:</label>
+  <input type="text" name="year_min" value="{{ year_min or '' }}">
+
+  <br><br>
+
+  <label>Year Max:</label>
+  <input type="text" name="year_max" value="{{ year_max or '' }}">
+
+  <br><br>
+
+  <button type="submit">Search</button>
+</form>
+
+<hr>
+
+{% if error %}
+  <p>{{ error }}</p>
+{% endif %}
+
+{% if meta %}
+  <p>{{ meta }}</p>
+{% endif %}
+
+{% if results %}
+  <table border="1">
+    <tr>
+      <th>ID</th>
+      <th>Title</th>
+      <th>Year</th>
+      <th>Age</th>
+      <th>Rotten Tomatoes</th>
+      <th>Netflix</th>
+      <th>Hulu</th>
+      <th>Prime Video</th>
+      <th>Disney+</th>
+      <th>Type</th>
+    </tr>
+
+    {% for r in results %}
+    <tr>
+      <td>{{ r["ID"] }}</td>
+      <td>{{ r["Title"] }}</td>
+      <td>{{ r["Year"] }}</td>
+      <td>{{ r["Age"] }}</td>
+      <td>{{ r["Rotten Tomatoes"] }}</td>
+      <td>{{ r["Netflix"] }}</td>
+      <td>{{ r["Hulu"] }}</td>
+      <td>{{ r["Prime Video"] }}</td>
+      <td>{{ r["Disney+"] }}</td>
+      <td>{{ r["Type"] }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+{% elif results is not none %}
+  <p>No matches.</p>
+{% endif %}
+
+</body>
+</html>

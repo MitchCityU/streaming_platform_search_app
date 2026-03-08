@@ -1,167 +1,231 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
-@dataclass
+@dataclass(slots=True)
 class TSTNode:
     """
     Node in a Ternary Search Tree.
     """
     char: str
-    left: object = None
-    mid: object = None
-    right: object = None
+    left: "TSTNode | None" = None
+    mid: "TSTNode | None" = None
+    right: "TSTNode | None" = None
     is_end: bool = False
-    record_ids: object = None
+    record_ids: set = field(default_factory=set)
 
 
 class TernarySearch:
     """
     Ternary Search Tree (TST) used for prefix searching.
+
+    Improvements over the basic version:
+    - iterative insert/get/search traversal to avoid recursion overhead
+    - deduplicated record IDs using a set
+    - prefix-search result caching for repeated queries
+    - configurable normalization
     """
 
-    def __init__(self):
+    def __init__(self, normalize_case=True, cache_size=256):
         self.root = None
+        self.normalize_case = normalize_case
+        self.cache_size = cache_size
+        self._cache = {}
+        self._cache_order = []
+        self._version = 0
+
+    def _normalize(self, key):
+        """
+        Normalize user input before inserting/searching.
+        """
+        if key is None:
+            return ""
+
+        key = key.strip()
+        if self.normalize_case:
+            key = key.lower()
+
+        return key
+
+    def _clear_cache(self):
+        """
+        Invalidate prefix cache after inserts.
+        """
+        self._cache.clear()
+        self._cache_order.clear()
+
+    def _cache_get(self, prefix, limit):
+        """
+        Return cached prefix-search result if valid.
+        """
+        cache_key = (prefix, limit, self._version)
+        return self._cache.get(cache_key)
+
+    def _cache_set(self, prefix, limit, result):
+        """
+        Store prefix-search result in a small FIFO cache.
+        """
+        cache_key = (prefix, limit, self._version)
+
+        if cache_key in self._cache:
+            return
+
+        if len(self._cache_order) >= self.cache_size:
+            oldest = self._cache_order.pop(0)
+            self._cache.pop(oldest, None)
+
+        self._cache[cache_key] = result
+        self._cache_order.append(cache_key)
 
     def insert(self, key, record_id):
         """
         Insert a key and associated record_id into the tree.
+
+        Iterative version to avoid recursion overhead.
         """
-        if key is None:
-            key = ""
-
-        key = key.strip()
-
+        key = self._normalize(key)
         if key == "":
             return
 
-        self.root = self.insert_node(self.root, key, 0, record_id)
+        if self.root is None:
+            self.root = TSTNode(key[0])
+
+        node = self.root
+        index = 0
+
+        while True:
+            current_char = key[index]
+
+            if current_char < node.char:
+                if node.left is None:
+                    node.left = TSTNode(current_char)
+                node = node.left
+
+            elif current_char > node.char:
+                if node.right is None:
+                    node.right = TSTNode(current_char)
+                node = node.right
+
+            else:
+                # Character matches
+                if index == len(key) - 1:
+                    node.is_end = True
+                    node.record_ids.add(record_id)
+                    self._version += 1
+                    self._clear_cache()
+                    return
+
+                index += 1
+                next_char = key[index]
+
+                if node.mid is None:
+                    node.mid = TSTNode(next_char)
+
+                node = node.mid
+
+    def get_node(self, key):
+        """
+        Iteratively navigate to the node for the last character of key.
+        """
+        key = self._normalize(key)
+
+        if key == "" or self.root is None:
+            return None
+
+        node = self.root
+        index = 0
+
+        while node is not None:
+            current_char = key[index]
+
+            if current_char < node.char:
+                node = node.left
+
+            elif current_char > node.char:
+                node = node.right
+
+            else:
+                if index == len(key) - 1:
+                    return node
+
+                index += 1
+                node = node.mid
+
+        return None
 
     def prefix_search(self, prefix, limit=50):
         """
         Return record_ids for keys that start with 'prefix'.
+
+        Uses caching to speed up repeated searches.
         """
-        if prefix is None:
-            prefix = ""
+        prefix = self._normalize(prefix)
 
-        prefix = prefix.strip()
-
-        if prefix == "":
+        if prefix == "" or self.root is None or limit <= 0:
             return []
 
-        if self.root is None:
-            return []
+        cached = self._cache_get(prefix, limit)
+        if cached is not None:
+            return list(cached)
 
-        node = self.get_node(self.root, prefix, 0)
-
+        node = self.get_node(prefix)
         if node is None:
             return []
 
         matches = []
 
-        # If the prefix itself is a full key
-        if node.is_end:
-            if node.record_ids is not None:
-                i = 0
-                while i < len(node.record_ids):
-                    matches.append(node.record_ids[i])
-                    i += 1
+        # If the prefix itself is a full key, include its IDs first.
+        if node.is_end and node.record_ids:
+            for record_id in node.record_ids:
+                matches.append(record_id)
+                if len(matches) >= limit:
+                    result = matches[:limit]
+                    self._cache_set(prefix, limit, tuple(result))
+                    return result
 
-        # Collect all words under this prefix
-        self.collect(node.mid, matches, limit)
+        # Collect descendants iteratively from node.mid
+        self.collect_iterative(node.mid, matches, limit)
 
-        return matches[:limit]
+        result = matches[:limit]
+        self._cache_set(prefix, limit, tuple(result))
+        return result
 
-    def insert_node(self, node, key, index, record_id):
+    def collect_iterative(self, start_node, output_list, limit):
         """
-        Recursive helper that inserts characters one at a time.
+        Iteratively collect record_ids from subtree starting at start_node.
+
+        Traversal order is equivalent to:
+        - left
+        - current
+        - mid
+        - right
+
+        Uses an explicit stack instead of recursion.
         """
-        current_char = key[index]
-
-        if node is None:
-            node = TSTNode(current_char)
-
-        if current_char < node.char:
-            node.left = self.insert_node(node.left, key, index, record_id)
-
-        elif current_char > node.char:
-            node.right = self.insert_node(node.right, key, index, record_id)
-
-        else:
-            # Characters match
-            if index == len(key) - 1:
-                node.is_end = True
-
-                if node.record_ids is None:
-                    node.record_ids = []
-
-                node.record_ids.append(record_id)
-
-            else:
-                node.mid = self.insert_node(node.mid, key, index + 1, record_id)
-
-        return node
-
-    def get_node(self, node, key, index):
-        """
-        Navigate the tree to find the node corresponding to the last
-        character of 'key'.
-        """
-        if node is None:
-            return None
-
-        current_char = key[index]
-
-        if current_char < node.char:
-            return self.get_node(node.left, key, index)
-
-        if current_char > node.char:
-            return self.get_node(node.right, key, index)
-
-        # Characters match
-        if index == len(key) - 1:
-            return node
-
-        return self.get_node(node.mid, key, index + 1)
-
-    def collect(self, node, output_list, limit):
-        """
-        Collect record_ids from subtree starting at node.
-
-        This performs a depth-first traversal:
-        - left subtree
-        - current node
-        - mid subtree
-        - right subtree
-        """
-        if node is None:
+        if start_node is None or len(output_list) >= limit:
             return
 
-        if len(output_list) >= limit:
-            return
+        stack = [(start_node, 0)]
 
-        # Traverse left subtree
-        self.collect(node.left, output_list, limit)
+        while stack and len(output_list) < limit:
+            node, state = stack.pop()
 
-        if len(output_list) >= limit:
-            return
+            if node is None:
+                continue
 
-        # If this node ends a key, add its record IDs
-        if node.is_end:
-            if node.record_ids is not None:
-                i = 0
-                while i < len(node.record_ids):
-                    output_list.append(node.record_ids[i])
+            if state == 0:
+                # Simulate recursive DFS:
+                # collect(left), visit(node), collect(mid), collect(right)
+                stack.append((node, 3))       # after mid -> do right
+                stack.append((node.mid, 0))   # traverse mid
+                stack.append((node, 1))       # visit node
+                stack.append((node.left, 0))  # traverse left
 
-                    if len(output_list) >= limit:
-                        return
+            elif state == 1:
+                if node.is_end and node.record_ids:
+                    for record_id in node.record_ids:
+                        output_list.append(record_id)
+                        if len(output_list) >= limit:
+                            return
 
-                    i += 1
-
-        # Traverse middle subtree
-        self.collect(node.mid, output_list, limit)
-
-        if len(output_list) >= limit:
-            return
-
-        # Traverse right subtree
-        self.collect(node.right, output_list, limit)
+            elif state == 3:
+                stack.append((node.right, 0))

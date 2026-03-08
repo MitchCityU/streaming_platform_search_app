@@ -11,6 +11,9 @@
 
   <label>Search Mode:</label>
   <select name="mode">
+    <option value="title_year" {% if mode == "title_year" %}selected{% endif %}>
+      Combined Search (Title prefix + Year range)
+    </option>
     <option value="tst" {% if mode == "tst" %}selected{% endif %}>
       Ternary Search Tree (Title prefix)
     </option>

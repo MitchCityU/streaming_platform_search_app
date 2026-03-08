@@ -44,6 +44,9 @@ BPTREE = BPlusSearch(order=6)
 
 
 def build_indexes(rows):
+    """
+    Build all indexes from the loaded CSV rows.
+    """
     # Build BY_ID dictionary
     for r in rows:
         record_id = r["ID"]
@@ -53,16 +56,13 @@ def build_indexes(rows):
     for r in rows:
         title_value = r["Title"]
         record_id = r["ID"]
-
         TST.insert(title_value, record_id)
 
     # Build Bloom index on Title (exact)
     bloom_items = []
-
     for r in rows:
         record_id = r["ID"]
         title_value = r["Title"]
-
         item_tuple = (record_id, title_value)
         bloom_items.append(item_tuple)
 
@@ -70,22 +70,111 @@ def build_indexes(rows):
 
     # Build B+ index on Year
     bplus_items = []
-
     for r in rows:
         record_id = r["ID"]
         year_value = r["Year"]
-
         item_tuple = (record_id, year_value)
         bplus_items.append(item_tuple)
 
     BPTREE.build(bplus_items)
 
 
+def ids_to_movies(record_ids, sort_results=True, limit=200):
+    """
+    Convert a list/set of record IDs into movie rows.
+    """
+    results = []
+
+    for record_id in record_ids:
+        movie = BY_ID.get(record_id)
+        if movie is not None:
+            results.append(movie)
+
+    if sort_results:
+        results.sort(key=lambda row: (row["Year"], row["Title"].lower(), row["ID"]))
+
+    return results[:limit]
+
+
+def parse_year_bounds(year_min_text, year_max_text):
+    """
+    Parse optional year bounds.
+    """
+    has_min = bool(year_min_text)
+    has_max = bool(year_max_text)
+
+    if not has_min and not has_max:
+        return None, None, False
+
+    if has_min and not has_max:
+        year_value = int(year_min_text)
+        return year_value, year_value, True
+
+    if has_max and not has_min:
+        year_value = int(year_max_text)
+        return year_value, year_value, True
+
+    y0 = int(year_min_text)
+    y1 = int(year_max_text)
+
+    min_year = min(y0, y1)
+    max_year = max(y0, y1)
+
+    return min_year, max_year, True
+
+
+def combined_title_year_search(title_query, year_min_text, year_max_text, final_limit=200):
+    """
+    Combined search using:
+    - TST for title prefix matching
+    - B+ tree for year range matching
+
+    The final result is the intersection of the two ID sets when both
+    filters are present. If only one filter is provided, only that index is used.
+    """
+    normalized_title = title_query.strip() if title_query else ""
+    min_year, max_year, has_year_filter = parse_year_bounds(year_min_text, year_max_text)
+
+    has_title_filter = bool(normalized_title)
+
+    if not has_title_filter and not has_year_filter:
+        return [], "Enter a title prefix and/or a year filter."
+
+    title_ids = None
+    year_ids = None
+
+    # Use the full dataset size as the retrieval cap from each index,
+    # then apply the final UI limit after intersection/sorting.
+    retrieval_limit = max(len(DATA), final_limit)
+
+    if has_title_filter:
+        title_ids = set(TST.prefix_search(normalized_title, limit=retrieval_limit))
+
+    if has_year_filter:
+        year_ids = set(BPTREE.search_range(min_year, max_year, limit=retrieval_limit))
+
+    if has_title_filter and has_year_filter:
+        # Intersect the two indexed result sets.
+        matched_ids = title_ids & year_ids
+        filter_desc = (
+            f'title prefix "{normalized_title}" AND year range {min_year}..{max_year}'
+        )
+    elif has_title_filter:
+        matched_ids = title_ids
+        filter_desc = f'title prefix "{normalized_title}"'
+    else:
+        matched_ids = year_ids
+        filter_desc = f"year range {min_year}..{max_year}"
+
+    results = ids_to_movies(matched_ids, sort_results=True, limit=final_limit)
+    return results, filter_desc
+
+
 @app.route("/")
 def home():
     return render_template(
         "index.html",
-        mode="tst",
+        mode="title_year",
         q="",
         year_min="",
         year_max="",
@@ -99,7 +188,7 @@ def home():
 def search():
     mode_value = request.args.get("mode")
     if mode_value is None:
-        mode_value = "tst"
+        mode_value = "title_year"
 
     mode = mode_value.strip().lower()
 
@@ -124,6 +213,32 @@ def search():
     t0 = time.perf_counter()
 
     try:
+        if mode == "title_year":
+            results, filter_desc = combined_title_year_search(
+                title_query=q,
+                year_min_text=year_min,
+                year_max_text=year_max,
+                final_limit=200,
+            )
+
+            dt = (time.perf_counter() - t0) * 1000.0
+            result_count = len(results)
+            meta = (
+                f"Combined indexed search ({filter_desc}) returned "
+                f"{result_count} rows in {dt:.3f} ms."
+            )
+
+            return render_template(
+                "index.html",
+                mode=mode,
+                q=q,
+                year_min=year_min,
+                year_max=year_max,
+                results=results,
+                error=None,
+                meta=meta,
+            )
+
         if mode == "tst":
             if not q:
                 return render_template(
@@ -138,15 +253,9 @@ def search():
                 )
 
             ids = TST.prefix_search(q, limit=50)
-
-            results = []
-
-            for record_id in ids:
-                movie = BY_ID[record_id]
-                results.append(movie)
+            results = ids_to_movies(ids, sort_results=True, limit=50)
 
             dt = (time.perf_counter() - t0) * 1000.0
-
             result_count = len(results)
             meta = f"TST prefix search returned {result_count} rows in {dt:.3f} ms."
 
@@ -175,15 +284,9 @@ def search():
                 )
 
             ids, bloom_meta = BLOOM.search(q)
-
-            results = []
-
-            for record_id in ids:
-                movie = BY_ID[record_id]
-                results.append(movie)
+            results = ids_to_movies(ids, sort_results=True, limit=50)
 
             dt = (time.perf_counter() - t0) * 1000.0
-
             result_count = len(results)
             meta = f"{bloom_meta} ({result_count} rows) in {dt:.3f} ms."
 
@@ -199,7 +302,7 @@ def search():
             )
 
         if mode == "bptree":
-            if not year_min or not year_max:
+            if not year_min and not year_max:
                 return render_template(
                     "index.html",
                     mode=mode,
@@ -208,26 +311,15 @@ def search():
                     year_max=year_max,
                     results=[],
                     error=None,
-                    meta="Provide year_min and year_max for B+ tree range search.",
+                    meta="Provide year_min and/or year_max for B+ tree range search.",
                 )
 
-            y0 = int(year_min)
-            y1 = int(year_max)
-
-            ids = BPTREE.search_range(y0, y1, limit=200)
-
-            results = []
-
-            for record_id in ids:
-                movie = BY_ID[record_id]
-                results.append(movie)
+            min_year, max_year, _ = parse_year_bounds(year_min, year_max)
+            ids = BPTREE.search_range(min_year, max_year, limit=200)
+            results = ids_to_movies(ids, sort_results=True, limit=200)
 
             dt = (time.perf_counter() - t0) * 1000.0
-
-            min_year = min(y0, y1)
-            max_year = max(y0, y1)
             result_count = len(results)
-
             meta = (
                 f"B+ tree range search {min_year}..{max_year} "
                 f"returned {result_count} rows in {dt:.3f} ms."
@@ -252,6 +344,18 @@ def search():
             year_max=year_max,
             results=[],
             error=f"Unknown mode: {mode}",
+            meta=None,
+        )
+
+    except ValueError:
+        return render_template(
+            "index.html",
+            mode=mode,
+            q=q,
+            year_min=year_min,
+            year_max=year_max,
+            results=[],
+            error="Year fields must be valid integers.",
             meta=None,
         )
 
